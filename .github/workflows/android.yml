@@ -1,0 +1,111 @@
+name: Android CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test, lint, build, and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Run unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Run lint
+        run: ./gradlew :app:lintDebug --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Prepare installable APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="app/build/outputs/apk/debug/output-metadata.json"
+          version="$(python3 -c "import json; print(json.load(open('$metadata'))['elements'][0]['versionName'])")"
+          apk_name="seenly-${version}-debug.apk"
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/${apk_name}"
+          (cd dist && sha256sum "$apk_name" > SHA256SUMS)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=${apk_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: seenly-debug-apk
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Seenly ${{ steps.apk.outputs.version }}
+          body: |
+            ## Seenly ${{ steps.apk.outputs.version }}
+
+            A local-first anime, cartoon, TV series, and movie tracker built with
+            Kotlin and Jetpack Compose.
+
+            ### Download
+
+            - `${{ steps.apk.outputs.apk_name }}`
+            - `SHA256SUMS`
+
+            ### Install
+
+            ```bash
+            adb install -r ${{ steps.apk.outputs.apk_name }}
+            ```
+
+            > [!IMPORTANT]
+            > This GitHub Release contains a debug-signed APK
+            > (`com.seenly.app.debug`) for sideloading and testing. Production
+            > release signing is not configured yet.
+          files: |
+            dist/*.apk
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
